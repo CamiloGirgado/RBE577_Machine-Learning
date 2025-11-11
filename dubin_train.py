@@ -6,7 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import random
 import os
-from tqdm import tqdm
+#from tqdm import tqdm
 
 # Dataset
 
