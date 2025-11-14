@@ -9,7 +9,7 @@ This script:
 3. Test set: climbs in 5° increments (intermediate values NEVER seen during training).
 4. Trains an LSTM to predict next (x,y,z) from previous ones.
 5. Logs training/validation loss with TensorBoard.
-6. Shows 10 INTERACTIVE 3D plots (no PNGs).
+6. Shows 10 INTERACTIVE 3D plots.
 
 Run:
     python dubin_LSTM_final.py
@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 # ---------------------------------------------------
-# Dubins airplane model (your original function)
+# Dubins airplane model
 # ---------------------------------------------------
 def dubinEHF3d(east1, north1, alt1, psi1, east2, north2, r, step, gamma):
     MAX_NUM_PATH_POINTS = 1000
@@ -219,10 +219,6 @@ def train_model(model, train_loader, val_loader, epochs=50, lr=1e-3, device="cpu
 # Interactive 3D Plots
 # ---------------------------------------------------
 def plot_predictions(model, dataset, device="cpu"):
-    """
-    Shows 10 LIVE interactive 3D plots.
-    You can rotate/zoom each trajectory window.
-    """
     model.eval()
 
     for i in range(10):
@@ -247,7 +243,7 @@ def plot_predictions(model, dataset, device="cpu"):
         ax.set_zlabel("Z")
         ax.legend()
 
-        plt.show()   # interactive window
+        plt.show()
 
 
 # ---------------------------------------------------
