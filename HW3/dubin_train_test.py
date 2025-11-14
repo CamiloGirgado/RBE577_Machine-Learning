@@ -1,41 +1,35 @@
 #!/usr/bin/env python3
 """
-Dubins Airplane Trajectory Prediction with LSTM
-------------------------------------------------
+Dubins Airplane LSTM Prediction (Deterministic Train/Test)
+----------------------------------------------------------
 
-This single script:
-1. Uses dubinEHF3d() to generate synthetic 3D Dubins airplane trajectories.
-2. Trains a Recurrent Neural Network (LSTM) to predict trajectories.
-3. Logs train/val losses with TensorBoard.
-4. Saves 10 plots comparing ground-truth vs. predicted trajectories.
+This script:
+1. Generates deterministic Dubins trajectories using dubinEHF3d().
+2. Training set: climbs in 10° increments.
+3. Test set: climbs in 5° increments (intermediate values NEVER seen during training).
+4. Trains an LSTM to predict next (x,y,z) from previous ones.
+5. Logs training/validation loss with TensorBoard.
+6. Shows 10 INTERACTIVE 3D plots (no PNGs).
 
 Run:
-    python dubin_LSTM_merged.py
+    python dubin_LSTM_final.py
 
-View logs:
+View TensorBoard:
     tensorboard --logdir runs
-
-Dependencies:
-    numpy
-    matplotlib
-    torch
-    tqdm
-    tensorboard
 """
 
 import os
 import math
-import random
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 # ---------------------------------------------------
-# Dubins airplane generator (from dubinEHF3d.py)
+# Dubins airplane model (your original function)
 # ---------------------------------------------------
 def dubinEHF3d(east1, north1, alt1, psi1, east2, north2, r, step, gamma):
     MAX_NUM_PATH_POINTS = 1000
@@ -128,34 +122,49 @@ def dubinEHF3d(east1, north1, alt1, psi1, east2, north2, r, step, gamma):
     psi_end = np.arctan2(north2 - path[num_path_points-1, 1], east2 - path[num_path_points-1, 0])
     return path[:num_path_points], psi_end, num_path_points
 
+
 # ---------------------------------------------------
-# Dataset generation
+# Deterministic dataset generator
 # ---------------------------------------------------
-def generate_dataset(num_samples=1000, seq_len=50, r=100, step=10):
+def generate_dataset(seq_len=50, r=100, step=10, climb_step_deg=10):
+    """
+    Deterministic grid:
+    - ψ: 0→350° in 10° increments
+    - γ: -30→30° in increments given by climb_step_deg
+    - goal_x, goal_y: 5×5 grid from −500 to 500
+    """
     data = []
-    for _ in tqdm(range(num_samples), desc="Generating Dubins data"):
-        psi = random.uniform(0, 2*np.pi)
-        gamma = math.radians(random.uniform(-30, 30))
-        goal_x = random.uniform(-500, 500)
-        goal_y = random.uniform(-500, 500)
-        traj, _, n = dubinEHF3d(0, 0, 0, psi, goal_x, goal_y, r, step, gamma)
-        if len(traj) < seq_len:
-            continue
-        # resample to fixed length
-        idx = np.linspace(0, len(traj)-1, seq_len).astype(int)
-        traj_fixed = traj[idx]
-        data.append(traj_fixed)
+    headings = np.deg2rad(np.arange(0, 360, 10))
+    climbs = np.deg2rad(np.arange(-30, 31, climb_step_deg))
+    goals = np.linspace(-500, 500, 5)
+
+    for psi in tqdm(headings, desc=f"Headings"):
+        for gamma in climbs:
+            for gx in goals:
+                for gy in goals:
+                    traj, _, n = dubinEHF3d(0, 0, 0, psi, gx, gy, r, step, gamma)
+                    if len(traj) < seq_len:
+                        continue
+                    idx = np.linspace(0, len(traj)-1, seq_len).astype(int)
+                    traj_fixed = traj[idx]
+                    data.append(traj_fixed)
+
     data = np.array(data)
+    print(f"Generated {len(data)} trajectories "
+          f"({len(headings)} ψ × {len(climbs)} γ × {len(goals)**2} goals)")
     return data
 
+
+# ---------------------------------------------------
+# Dataset class
+# ---------------------------------------------------
 class DubinsDataset(Dataset):
     def __init__(self, trajectories):
         self.x = torch.tensor(trajectories[:, :-1, :], dtype=torch.float32)
         self.y = torch.tensor(trajectories[:, 1:, :], dtype=torch.float32)
-    def __len__(self):
-        return len(self.x)
-    def __getitem__(self, idx):
-        return self.x[idx], self.y[idx]
+    def __len__(self): return len(self.x)
+    def __getitem__(self, idx): return self.x[idx], self.y[idx]
+
 
 # ---------------------------------------------------
 # LSTM Model
@@ -167,8 +176,8 @@ class LSTMModel(nn.Module):
         self.fc = nn.Linear(hidden_dim, output_dim)
     def forward(self, x):
         out, _ = self.lstm(x)
-        out = self.fc(out)
-        return out
+        return self.fc(out)
+
 
 # ---------------------------------------------------
 # Training
@@ -201,45 +210,72 @@ def train_model(model, train_loader, val_loader, epochs=50, lr=1e-3, device="cpu
         val_loss /= len(val_loader)
 
         writer.add_scalars("Loss", {"train": train_loss, "val": val_loss}, epoch)
-        print(f"Epoch {epoch+1}/{epochs}  Train: {train_loss:.5f}  Val: {val_loss:.5f}")
+        print(f"Epoch {epoch+1:03d} | Train={train_loss:.6f} | Val={val_loss:.6f}")
 
     writer.close()
 
+
 # ---------------------------------------------------
-# Visualization
+# Interactive 3D Plots
 # ---------------------------------------------------
-def plot_predictions(model, dataset, device="cpu", save_dir="plots"):
-    os.makedirs(save_dir, exist_ok=True)
+def plot_predictions(model, dataset, device="cpu"):
+    """
+    Shows 10 LIVE interactive 3D plots.
+    You can rotate/zoom each trajectory window.
+    """
     model.eval()
+
     for i in range(10):
         x, y = dataset[i]
-        x, y = x.unsqueeze(0).to(device), y.to(device)
+        x = x.unsqueeze(0).to(device)
+        y = y.to(device)
+
         with torch.no_grad():
             pred = model(x)[0].cpu().numpy()
+
         gt = y.cpu().numpy()
+
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
-        ax.plot(gt[:,0], gt[:,1], gt[:,2], 'b-', label='Ground Truth')
-        ax.plot(pred[:,0], pred[:,1], pred[:,2], 'r--', label='Prediction')
+
+        ax.plot(gt[:,0], gt[:,1], gt[:,2], 'b-', label="Ground Truth")
+        ax.plot(pred[:,0], pred[:,1], pred[:,2], 'r--', label="Prediction")
+
+        ax.set_title(f"Trajectory {i}")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
         ax.legend()
-        ax.set_title(f"Example {i}")
-        plt.savefig(f"{save_dir}/traj_{i}.png")
-        plt.close()
+
+        plt.show()   # interactive window
+
 
 # ---------------------------------------------------
 # Main
 # ---------------------------------------------------
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    data = generate_dataset(1200, seq_len=50)
-    dataset = DubinsDataset(data)
-    n_train = int(0.8 * len(dataset))
-    n_val = len(dataset) - n_train
-    train_set, val_set = random_split(dataset, [n_train, n_val])
+
+    print("\n--- Generating TRAINING set (γ step = 10°) ---")
+    train_data = generate_dataset(seq_len=50, climb_step_deg=10)
+    train_dataset = DubinsDataset(train_data)
+
+    print("\n--- Generating TEST set (γ step = 5°) ---")
+    test_data = generate_dataset(seq_len=50, climb_step_deg=5)
+    test_dataset = DubinsDataset(test_data)
+
+    # Split train→train/val
+    n_train = int(0.8 * len(train_dataset))
+    n_val = len(train_dataset) - n_train
+    train_set, val_set = torch.utils.data.random_split(train_dataset, [n_train, n_val])
     train_loader = DataLoader(train_set, batch_size=32, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=32)
 
     model = LSTMModel().to(device)
+
     train_model(model, train_loader, val_loader, epochs=60, lr=1e-3, device=device)
-    plot_predictions(model, dataset, device)
-    print("✅ Training complete. Plots saved to /plots and TensorBoard logs in /runs/")
+
+    print("\n--- Showing INTERACTIVE TEST PLOTS (γ step = 5°) ---")
+    plot_predictions(model, test_dataset, device)
+
+    print("\n✅ Finished: live plots shown, TensorBoard logs written to ./runs")
